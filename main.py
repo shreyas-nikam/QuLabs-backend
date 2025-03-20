@@ -83,6 +83,10 @@ def run_container(app_name: str, docker_image: str, port: int):
     mongoclient.update("lab_design", {"_id": ObjectId(app_name)}, {"$set": {"running_status": "running"}})
 
 
+@app.get("/")
+def read_root():
+    return {"message": "Hello World"}
+
 @app.post("/register_app")
 def register_app(data: dict):
     """
