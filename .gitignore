@@ -1,0 +1,36 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+build/
+dist/
+eggs/
+*.egg-info/
+.egg/
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Virtual environments
+venv/
+.env/
+
+# MyPy
+.mypy_cache/
+
+# Pytest cache
+.pytest_cache/
+
+# Docker
+*.log
+docker-compose.override.yml
+.env
+
+# IDEs
+.vscode/
+.idea/
