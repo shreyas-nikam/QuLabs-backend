@@ -85,7 +85,7 @@ def run_container(app_name: str, docker_image: str, port: int):
 
 @app.get("/")
 def read_root():
-    return {"message": "Hello World"}
+    return {"message": "Hello World from QuLabs Backend!"}
 
 @app.post("/register_app")
 def register_app(data: dict):
