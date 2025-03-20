@@ -87,6 +87,10 @@ def run_container(app_name: str, docker_image: str, port: int):
 def read_root():
     return {"message": "Hello World from QuLabs Backend!"}
 
+@app.get("/health-check")
+def health_check():
+    return {"status": "ok"}
+
 @app.post("/register_app")
 def register_app(data: dict):
     """
