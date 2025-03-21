@@ -85,11 +85,11 @@ def run_container(app_name: str, docker_image: str, port: int):
 
 @app.get("/")
 def read_root(request: Request):
-    return {"message": "Hello World 2"}
+    return {"message": "Hello World 3"}
 
 @app.get("/health-check")
 def health_check(request: Request):
-    return {"status": "ok 2"}
+    return {"status": "ok 3"}
 
 @app.post("/register_app")
 def register_app(data: dict):
