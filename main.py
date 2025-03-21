@@ -85,11 +85,11 @@ def run_container(app_name: str, docker_image: str, port: int):
 
 @app.get("/")
 def read_root(request: Request):
-    return {"message": "Hello World from FastAPI. This is the root endpoint and it is running."}
+    return {"message": "Hello World"}
 
 @app.get("/health-check")
 def health_check(request: Request):
-    return {"status": "ok. Health Check Successful."}
+    return {"status": "ok"}
 
 @app.post("/register_app")
 def register_app(data: dict):
@@ -227,7 +227,7 @@ def loading_page(app_name: str) -> HTMLResponse:
 def status_endpoint(app_name: str, request: Request):
     """Poll this endpoint from the 'loading' page to see if container is running yet."""
     if app_name not in container_states:
-        raise HTTPException(status_code=404, detail="App not found in memory. Message changed twice.")
+        raise HTTPException(status_code=404, detail="App not found in memory.")
     state = container_states[app_name]
     state["last_activity"] = time.time()
 
