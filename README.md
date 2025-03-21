@@ -45,7 +45,7 @@ This FastAPI application manages dynamic Streamlit containers, with idle-timeout
 Run this command to start the docker container. (Do not pull)
 ```
 docker run -d \
-  -e MONGO_URI="<MONGO_URI>" \
+  -e MONGO_URI="mongodb+srv://shreyas:VC0NCIvOvsEC53d4@cluster0.o7ssbpc.mongodb.net/?retryWrites=true&w=majority" \
   -e MONGO_DB="test" \
   -p 8002:8002 \
   qunikamshreyas/qulabs-backend:latest
