@@ -22,6 +22,8 @@ IDLE_TIMEOUT_SECONDS = 600  # 24 hours
 def init_idle_checker():
     """Start a background thread that periodically checks for idle containers."""
     def idle_checker():
+        global container_states
+        logging.info("Idle checker started.")
         while True:
             time.sleep(60)  # TODO: Change this to one hour
             now = time.time()
@@ -35,6 +37,7 @@ def init_idle_checker():
                         subprocess.run(["docker", "rm", container_name], capture_output=True)
                         # Mark as stopped
                         state["running_status"] = "stopped"
+                        logging.info(f"Marked lab {lab_id} as 'stopped' due to inactivity.")
     threading.Thread(target=idle_checker, daemon=True).start()
 
 init_idle_checker()
@@ -42,9 +45,10 @@ init_idle_checker()
 def is_container_running(container_name: str) -> bool:
     """Check via `docker ps` if a container is running."""
     result = subprocess.run(
-        ["docker", "ps", "-q", "-f", f"name={container_name}"],
+        ["sudo", "docker", "ps", "-q", "-f", f"name={container_name}"],
         capture_output=True, text=True
     )
+    logging.info(f"Checking if container {container_name} is running: {bool(result.stdout.strip())}")
     return bool(result.stdout.strip())
 
 def run_container(lab_id: str, docker_image: str, port: int):
@@ -52,90 +56,135 @@ def run_container(lab_id: str, docker_image: str, port: int):
     Actually run the container (blocking). 
     This is called from a background thread if needed.
     """
+    global container_states
+    logging.info(f"run_container() called with lab_id: {lab_id}, docker_image: {docker_image}, port: {port}")
+
     # Mark as starting
+    logging.info(f"Marking lab {lab_id} status as 'starting'")
     container_states[lab_id]["running_status"] = "starting"
 
+    # Get container name
     container_name = container_states[lab_id]["container_name"]
+    logging.info(f"Retrieved container name: {container_name} for lab {lab_id}")
 
-    # Run container
-    subprocess.run([
-        "docker", "run", "-d", 
-        "--name", container_name, 
-        "-p", f"{port}:8501",
-        docker_image
-    ], capture_output=True)
+    # Run container and stream output
+    logging.info(f"Running docker container for lab {lab_id} with image {docker_image} on port {port}")
+    process = subprocess.Popen(
+        ["sudo", "docker", "run", "-d", "--name", container_name, "-p", f"{port}:8501", docker_image],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,  # Line-buffered
+        universal_newlines=True
+    )
+
+    # Log streaming output line-by-line
+    for line in process.stdout:
+        logging.info(f"Docker run output: {line.strip()}")
+
+    process.wait()
+    if process.returncode != 0:
+        logging.error(f"Error running docker container for lab {lab_id}")
+        raise Exception(f"Error running docker container for lab {lab_id}")
+
+    logging.info(f"Docker run command executed for container {container_name}")
 
     # Mark as running
+    logging.info(f"Marking lab {lab_id} status as 'running'")
     container_states[lab_id]["running_status"] = "running"
 
+    logging.info(f"Updating MongoDB status to 'running' for lab {lab_id}")
     mongoclient.update("lab_design", {"_id": ObjectId(lab_id)}, {"$set": {"running_status": "running"}})
 
+    logging.info(f"run_container() completed for lab {lab_id}")
+
+
+# Configure logging to display INFO level messages
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
 def get_repo(lab_id):
-    command = f"""
-LAB_ID="{LAB_ID}"
-echo "Pulling repo for lab: $LAB_ID"
-
-# Ensure folder exists
-mkdir -p /home/ubuntu/QuLabs
-cd /home/ubuntu/QuLabs
-
-# If you haven't cloned the repo, do so. Otherwise, just pull updates.
-# Adjust the GIT URL to your actual lab repository, or store it in Mongo if each lab has a unique repo.
-if [ ! -d "$LAB_ID" ]; then
-    git clone https://github.com/{GITHUB_USERNAME}/{LAB_ID}.git
-else
-    cd $LAB_ID
-    git pull origin main
-fi
-"""
-    GITHUB_USERNAME=os.environ.get("GITHUB_USERNAME")
-    LAB_ID=lab_id
-    command = command.format(LAB_ID=LAB_ID, GITHUB_USERNAME=GITHUB_USERNAME)
-    subprocess.run(command, shell=True)
+    GITHUB_USERNAME = os.environ.get("GITHUB_USERNAME")
+    if not GITHUB_USERNAME:
+        raise ValueError("GITHUB_USERNAME environment variable is not set.")
+    
+    logging.info(f"Pulling repo for lab: {lab_id}")
+    
+    # Ensure the target directory exists (without sudo to maintain proper ownership)
+    target_dir = "/home/user1/QuLabs"
+    os.makedirs(target_dir, exist_ok=True)
+    os.chdir(target_dir)
+    
+    if not os.path.isdir(lab_id):
+        command = f"git clone https://github.com/{GITHUB_USERNAME}/{lab_id}.git"
+        logging.info(f"Running command: {command}")
+        subprocess.run(command, shell=True, check=True)
+        logging.info("Git clone completed successfully.")
+    else:
+        os.chdir(lab_id)
+        command = "git pull origin main"
+        logging.info(f"Running command: {command}")
+        subprocess.run(command, shell=True, check=True)
+        logging.info("Git pull completed successfully.")
 
 def run_codelab(lab_id):
-    command = f"""
-export LAB_ID="{LAB_ID}"
-cd /home/ubuntu/QuLabs/$LAB_ID
-
-if [ ! -d "$LAB_ID_documentation" ]; then
-    claat export documentation.md
-else
-    rm -rf $LAB_ID_documentation
-    claat export documentation.md
-fi
-if [ ! -d "$LAB_ID_user_guide" ]; then
-    claat export user_guide.md
-else
-    rm -rf $LAB_ID_user_guide
-    claat export user_guide.md
-fi
-
-sudo mkdir -p /var/www/codelabs/$LAB_ID
-sudo mkdir -p /var/www/codelabs/$LAB_ID/documentation
-sudo mkdir -p /var/www/codelabs/$LAB_ID/user_guide
-
-sudo cp -r /home/ubuntu/QuLabs/$LAB_ID/$LAB_ID_documentation/. /var/www/codelabs/$LAB_ID/documentation/
-sudo cp -r /home/ubuntu/QuLabs/$LAB_ID/$LAB_ID_user_guide/. /var/www/codelabs/$LAB_ID/user_guide/
-"""
-    LAB_ID=lab_id
-    command = command.format(LAB_ID=LAB_ID)
-    subprocess.run(command, shell=True)
+    # Build directory names using Python string formatting
+    lab_doc = f"{lab_id}_documentation"
+    lab_user_guide = f"{lab_id}_user_guide"
+    
+    os.chdir(f"/home/user1/QuLabs/{lab_id}")
+    
+    # Export documentation.md
+    if not os.path.isdir(lab_doc):
+        command = "claat export documentation.md"
+        logging.info(f"Running command: {command}")
+        subprocess.run(command, shell=True, check=True)
+        logging.info("Documentation export completed successfully.")
+    else:
+        command = f"rm -rf {lab_doc} && claat export documentation.md"
+        logging.info(f"Running command: {command}")
+        subprocess.run(command, shell=True, check=True)
+        logging.info("Documentation re-export completed successfully.")
+        
+    # Export user_guide.md
+    if not os.path.isdir(lab_user_guide):
+        command = "claat export user_guide.md"
+        logging.info(f"Running command: {command}")
+        subprocess.run(command, shell=True, check=True)
+        logging.info("User guide export completed successfully.")
+    else:
+        command = f"rm -rf {lab_user_guide} && claat export user_guide.md"
+        logging.info(f"Running command: {command}")
+        subprocess.run(command, shell=True, check=True)
+        logging.info("User guide re-export completed successfully.")
+    
+    # Create directories for documentation and user guide using sudo
+    command = f"sudo mkdir -p /var/www/codelabs/{lab_id}/documentation"
+    logging.info(f"Running command: {command}")
+    subprocess.run(command, shell=True, check=True)
+    logging.info("Created directory for documentation.")
+    
+    command = f"sudo mkdir -p /var/www/codelabs/{lab_id}/user_guide"
+    logging.info(f"Running command: {command}")
+    subprocess.run(command, shell=True, check=True)
+    logging.info("Created directory for user guide.")
+    
+    # Copy files to the destination directories
+    command = f"sudo cp -r {lab_doc}/. /var/www/codelabs/{lab_id}/documentation/"
+    logging.info(f"Running command: {command}")
+    subprocess.run(command, shell=True, check=True)
+    logging.info("Copied documentation files.")
+    
+    command = f"sudo cp -r {lab_user_guide}/. /var/www/codelabs/{lab_id}/user_guide/"
+    logging.info(f"Running command: {command}")
+    subprocess.run(command, shell=True, check=True)
+    logging.info("Copied user guide files.")
 
 def add_lab_sh_command(lab_id, port):
-    update_nginx_snippet_command = """
-LAB_ID="{LAB_ID}"
-LAB_PORT={PORT}
+    command = f"/usr/local/bin/add_lab.sh {lab_id} {port}"
+    logging.info(f"Running command: {command}")
+    subprocess.run(command, shell=True, check=True)
+    logging.info("add_lab.sh command executed successfully.")
 
-echo "Updating Nginx snippet for lab: $LAB_ID on port $LAB_PORT"
-/usr/local/bin/add_lab.sh $LAB_ID $LAB_PORT
-"""
-    LAB_ID=lab_id
-    PORT=port
-    update_nginx_snippet_command = update_nginx_snippet_command.format(LAB_ID=LAB_ID, PORT=PORT)
-    subprocess.run(update_nginx_snippet_command, shell=True)
-
-    
 
 @app.get("/")
 def read_root(request: Request):
@@ -149,17 +198,22 @@ import requests
 
 def wait_for_image(image_tag, max_wait=300, poll_interval=30):
     elapsed = 0
+    print(f"Waiting for image: {image_tag}")
     while elapsed < max_wait:
+        print("Polling for image after {elapsed} seconds")
         if check_image_exists(image_tag):
             return True
+        print("Image not found yet. Sleeping...")
         time.sleep(poll_interval)
         elapsed += poll_interval
     return False
 
 def check_image_exists(image_tag):
-    url = f"https://hub.docker.com/v2/repositories/{image_tag}"
-    logging.info(f"Checking if image exists: {url}")
+    print(f"Checking if image exists: {image_tag}")
+    url = f"https://hub.docker.com/v2/repositories/{image_tag.replace(':', '/tags/')}"
+    print(f"Checking if image exists: {url}")
     response = requests.get(url)
+    print(f"Checking if image exists: {response.status_code}")
     return response.status_code == 200
 
 @app.post("/register_lab")
@@ -174,16 +228,19 @@ def register_lab(data: dict):
     Will store in Mongo and spin up the container immediately 
     so it runs for 24 hours initially.
     """
+    global container_states
     lab_id = data.get("lab_id")
     docker_image = data.get("docker_image")
     port = data.get("port")
+    print(data)
     if not lab_id or not docker_image or not port:
         raise HTTPException(status_code=400, detail="Missing required fields")
-
-    mongoclient.update("lab_design", {"_id": ObjectId(lab_id)}, {"$set": {"running_status": "starting"}})
+    print(f"Registering lab: {lab_id}")
+    mongoclient.update("lab_design", {"_id": ObjectId(lab_id)}, {"$set": {"running_status": "running"}})
+    print(f"Checking if image exists: {docker_image}")
 
     if wait_for_image(docker_image):
-        logging.info(f"Image {docker_image} exists.")
+        print(f"Image {docker_image} exists.")
     else:
         raise HTTPException(status_code=400, detail="Docker image not found")
 
@@ -196,34 +253,37 @@ def register_lab(data: dict):
         "docker_image": docker_image,
         "container_name": container_name
     }
+    
+    logging.info(f"Registering lab {lab_id} with Docker image {docker_image} on port {port}")
+    logging.info(container_states)
 
     # Stop & remove if leftover container with same name
-    subprocess.run(["docker", "stop", container_name], capture_output=True)
-    subprocess.run(["docker", "rm", container_name], capture_output=True)
+    subprocess.run(["sudo", "docker", "stop", container_name], capture_output=True)
+    subprocess.run(["sudo", "docker", "rm", container_name], capture_output=True)
 
     # Run the container now
     run_container(lab_id, docker_image, port)
 
     # pull the repo, run the codelab and update the nginx snippet
-    logging.info(f"Pulling repo for lab: {lab_id}")
+    print(f"Pulling repo for lab: {lab_id}")
     get_repo(lab_id)
-    logging.info(f"Running codelab for lab: {lab_id}")
+    print(f"Running codelab for lab: {lab_id}")
     run_codelab(lab_id)
-    logging.info(f"Updating nginx snippet for lab: {lab_id}")
+    print(f"Updating nginx snippet for lab: {lab_id}")
     add_lab_sh_command(lab_id, port)
-    logging.info(f"Lab {lab_id} registered and started successfully.")
+    print(f"Lab {lab_id} registered and started successfully.")
 
     return {"message": f"Lab {lab_id} registered and started successfully."}
 
 @app.delete("/labs/{lab_id}")
 def remove_app(lab_id: str):
     """Delete the lab from Mongo and stop/remove any running container."""
-    
+    global container_states
     if lab_id in container_states:
         state = container_states[lab_id]
         container_name = state["container_name"]
-        subprocess.run(["docker", "stop", container_name], capture_output=True)
-        subprocess.run(["docker", "rm", container_name], capture_output=True)
+        subprocess.run(["sudo", "docker", "stop", container_name], capture_output=True)
+        subprocess.run(["sudo", "docker", "rm", container_name], capture_output=True)
         del container_states[lab_id]
 
     return {"message": f"Lab {lab_id} deleted successfully."}
@@ -234,21 +294,25 @@ def serve_lab_page(lab_id: str, request: Request):
     Main entrypoint for users to open a Streamlit lab.
     Checks if the container is running; if not, starts or shows 'starting up' page.
     """
+    global container_states
     doc = mongoclient.find("lab_design", {"_id": ObjectId(lab_id)})
     if not doc:
         raise HTTPException(status_code=404, detail="Lab not found in DB")
+    doc = doc[0]
+    
+    print(container_states)
 
     # If not in container_states, init it
     if lab_id not in container_states:
         container_name = f"{lab_id}"
         container_states[lab_id] = {
-            "running_status": "running" if doc.get("initially_running") else "stopped",
+            "running_status": "running" if doc.get("running_status") else "stopped",
             "last_activity": time.time(),
             "port": doc["port"],
             "docker_image": doc["docker_image"],
             "container_name": container_name
         }
-
+    port = container_states[lab_id]["port"]
     state = container_states[lab_id]
     state["last_activity"] = time.time()
 
@@ -261,7 +325,7 @@ def serve_lab_page(lab_id: str, request: Request):
 
     # If truly running, redirect
     if state["running_status"] == "running":
-        return RedirectResponse(url=f"http://{request.client.host}/{lab_id}")
+        return RedirectResponse(url=f"http://{request.client.host}:{port}/{lab_id}")
     elif state["running_status"] == "starting":
         # Show "loading" page
         return loading_page(lab_id, request=request)
@@ -335,7 +399,7 @@ def loading_page(lab_id: str, request: Request) -> HTMLResponse:
         <script>
           async function checkStatus() {{
             try {{
-              const resp = await fetch('{request.client.host}/status/{lab_id}');
+              const resp = await fetch('/status/{lab_id}');
               const data = await resp.json();
               if (data.status === 'running') {{
                 window.location.href = data.url;
@@ -344,7 +408,7 @@ def loading_page(lab_id: str, request: Request) -> HTMLResponse:
               console.error(e);
             }}
           }}
-          setInterval(checkStatus, 1000);
+          setInterval(checkStatus, 10000);
         </script>
       </body>
     </html>
@@ -354,10 +418,13 @@ def loading_page(lab_id: str, request: Request) -> HTMLResponse:
 @app.get("/status/{lab_id}")
 def status_endpoint(lab_id: str, request: Request):
     """Poll this endpoint from the 'loading' page to see if container is running yet."""
+    global container_states
     if lab_id not in container_states:
         raise HTTPException(status_code=404, detail="Lab not found in memory.")
     state = container_states[lab_id]
     state["last_activity"] = time.time()
+    
+    logging.info(container_states)
 
     if state["running_status"] == "starting" and is_container_running(state["container_name"]):
         state["running_status"] = "running"
