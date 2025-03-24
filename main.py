@@ -1,3 +1,4 @@
+import requests
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 import time
@@ -9,21 +10,53 @@ from bson import ObjectId
 import os
 from dotenv import load_dotenv
 import logging
+from jinja2 import Environment, FileSystemLoader
+import json
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 load_dotenv()
-
+templates_dir = os.path.join(os.path.dirname(__file__), "templates")
+env = Environment(loader=FileSystemLoader(templates_dir))
 app = FastAPI()
 mongoclient = AtlasClient()
 container_states: Dict[str, Dict] = {}
 
+
+def save_container_states(file_path="container_states.json"):
+    try:
+        with open(file_path, "w") as f:
+            json.dump(container_states, f)
+        logging.info("Container states saved successfully.")
+    except Exception as e:
+        logging.error(f"Error saving container states: {e}")
+
+def load_container_states(file_path="container_states.json"):
+    global container_states
+    try:
+        with open(file_path, "r") as f:
+            container_states = json.load(f)
+        logging.info("Container states loaded successfully.")
+    except FileNotFoundError:
+        logging.info("No previous container states file found. Starting fresh.")
+        container_states = {}
+    except Exception as e:
+        logging.error(f"Error loading container states: {e}")
+        container_states = {}
+
+
 # TODO: Change this to 24 hours
-IDLE_TIMEOUT_SECONDS = 600  # 24 hours
+IDLE_TIMEOUT_SECONDS = 60  # 24 hours
 
 def init_idle_checker():
     """Start a background thread that periodically checks for idle containers."""
+    if not container_states:
+        load_container_states()
+    logging.info("Initializing idle checker.")
+    logging.info(f"Initial container states: {container_states}")
     def idle_checker():
-        global container_states
+        
         logging.info("Idle checker started.")
+        logging.info(f"Initial container states: {container_states}")
         while True:
             time.sleep(60)  # TODO: Change this to one hour
             now = time.time()
@@ -33,11 +66,14 @@ def init_idle_checker():
                     if (now - last_active) > IDLE_TIMEOUT_SECONDS:
                         # Stop container
                         container_name = state["container_name"]
-                        subprocess.run(["docker", "stop", container_name], capture_output=True)
-                        subprocess.run(["docker", "rm", container_name], capture_output=True)
+                        logging.info(f"Stopping container {container_name} due to inactivity.")
+                        subprocess.run(["sudo", "docker", "stop", container_name], capture_output=True)
+                        subprocess.run(["sudo", "docker", "rm", container_name], capture_output=True)
+                        subprocess.run(["sudo", "docker", "system", "prune", "-a"], capture_output=True)
                         # Mark as stopped
                         state["running_status"] = "stopped"
                         logging.info(f"Marked lab {lab_id} as 'stopped' due to inactivity.")
+                        save_container_states()
     threading.Thread(target=idle_checker, daemon=True).start()
 
 init_idle_checker()
@@ -51,56 +87,117 @@ def is_container_running(container_name: str) -> bool:
     logging.info(f"Checking if container {container_name} is running: {bool(result.stdout.strip())}")
     return bool(result.stdout.strip())
 
-def run_container(lab_id: str, docker_image: str, port: int):
-    """
-    Actually run the container (blocking). 
-    This is called from a background thread if needed.
-    """
-    global container_states
-    logging.info(f"run_container() called with lab_id: {lab_id}, docker_image: {docker_image}, port: {port}")
+def container_exists(container_name: str) -> bool:
+    """Return True if a container with the exact name exists (running or not)."""
+    cmd = [
+        "sudo", "docker", "ps", "-a", 
+        "--filter", f"name=^{container_name}$", 
+        "--format", "{{.Names}}"
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    exists = bool(result.stdout.strip())
+    logging.info(f"Container '{container_name}' exists: {exists}")
+    return exists
 
-    # Mark as starting
-    logging.info(f"Marking lab {lab_id} status as 'starting'")
-    container_states[lab_id]["running_status"] = "starting"
+def container_running(container_name: str) -> bool:
+    """Return True if a container with the exact name is running."""
+    cmd = [
+        "sudo", "docker", "ps", 
+        "--filter", f"name=^{container_name}$", 
+        "--format", "{{.Names}}"
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    running = bool(result.stdout.strip())
+    logging.info(f"Container '{container_name}' running: {running}")
+    return running
 
-    # Get container name
-    container_name = container_states[lab_id]["container_name"]
-    logging.info(f"Retrieved container name: {container_name} for lab {lab_id}")
+def start_existing_container(container_name: str, lab_id: str):
+    """Start a container that exists but is not running."""
+    logging.info(f"Container {container_name} exists but is not running. Starting it.")
+    cmd = ["sudo", "docker", "start", container_name]
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1
+    )
+    for line in process.stdout:
+        logging.info(f"Docker start output: {line.strip()}")
+    process.wait()
+    if process.returncode != 0:
+        logging.error(f"Error starting container {container_name} for lab {lab_id}")
+        raise Exception(f"Error starting container {container_name} for lab {lab_id}")
+    logging.info(f"Container {container_name} started successfully.")
 
-    # Run container and stream output
-    logging.info(f"Running docker container for lab {lab_id} with image {docker_image} on port {port}")
+def run_new_container(container_name: str, docker_image: str, port: int, lab_id: str):
+    """Run a new container using docker run."""
+    logging.info(f"Running new docker container for lab {lab_id} with image {docker_image} on port {port}")
     process = subprocess.Popen(
         ["sudo", "docker", "run", "-d", "--name", container_name, "-p", f"{port}:8501", docker_image],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        bufsize=1,  # Line-buffered
-        universal_newlines=True
+        bufsize=1
     )
-
-    # Log streaming output line-by-line
     for line in process.stdout:
         logging.info(f"Docker run output: {line.strip()}")
-
     process.wait()
     if process.returncode != 0:
         logging.error(f"Error running docker container for lab {lab_id}")
         raise Exception(f"Error running docker container for lab {lab_id}")
+    logging.info(f"Docker run command executed successfully for container {container_name}")
 
-    logging.info(f"Docker run command executed for container {container_name}")
-
-    # Mark as running
-    logging.info(f"Marking lab {lab_id} status as 'running'")
+def update_container_state_and_db(lab_id: str):
+    """Mark the container as running, save state and update the database."""
     container_states[lab_id]["running_status"] = "running"
-
+    save_container_states()
     logging.info(f"Updating MongoDB status to 'running' for lab {lab_id}")
     mongoclient.update("lab_design", {"_id": ObjectId(lab_id)}, {"$set": {"running_status": "running"}})
+    logging.info(f"Container state updated for lab {lab_id}")
 
+def run_container(lab_id: str, docker_image: str, port: int):
+    """
+    Actually run the container (blocking). 
+    This is called from a background thread if needed.
+    """
+    # Update container_states for this lab
+    if lab_id not in container_states:
+        container_states[lab_id] = {
+            "running_status": "starting",
+            "last_activity": time.time(),
+            "port": port,
+            "docker_image": docker_image,
+            "container_name": lab_id
+        }
+    else:
+        container_states[lab_id].update({
+            "running_status": "starting",
+            "last_activity": time.time(),
+            "port": port,
+            "docker_image": docker_image,
+            "container_name": lab_id
+        })
+
+    logging.info(f"run_container() called with lab_id: {lab_id}, docker_image: {docker_image}, port: {port}")
+    container_name = container_states[lab_id]["container_name"]
+    logging.info(f"Retrieved container name: {container_name} for lab {lab_id}")
+
+    if container_exists(container_name):
+        if container_running(container_name):
+            logging.info(f"Container {container_name} is already running.")
+        else:
+            start_existing_container(container_name, lab_id)
+        # Update state and DB, then return
+        update_container_state_and_db(lab_id)
+        logging.info(f"run_container() completed for lab {lab_id}")
+        return
+
+    # If container does not exist, run a new one
+    run_new_container(container_name, docker_image, port, lab_id)
+    update_container_state_and_db(lab_id)
     logging.info(f"run_container() completed for lab {lab_id}")
 
-
-# Configure logging to display INFO level messages
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 def get_repo(lab_id):
     GITHUB_USERNAME = os.environ.get("GITHUB_USERNAME")
@@ -194,26 +291,25 @@ def read_root(request: Request):
 def health_check(request: Request):
     return {"status": "ok"}
 
-import requests
 
 def wait_for_image(image_tag, max_wait=300, poll_interval=30):
     elapsed = 0
-    print(f"Waiting for image: {image_tag}")
+    logging.info(f"Waiting for image: {image_tag}")
     while elapsed < max_wait:
-        print("Polling for image after {elapsed} seconds")
+        logging.info(f"Polling for image after {elapsed} seconds")
         if check_image_exists(image_tag):
             return True
-        print("Image not found yet. Sleeping...")
+        logging.info("Image not found yet. Sleeping...")
         time.sleep(poll_interval)
         elapsed += poll_interval
     return False
 
 def check_image_exists(image_tag):
-    print(f"Checking if image exists: {image_tag}")
+    logging.info(f"Checking if image exists: {image_tag}")
     url = f"https://hub.docker.com/v2/repositories/{image_tag.replace(':', '/tags/')}"
-    print(f"Checking if image exists: {url}")
+    logging.info(f"Checking if image exists: {url}")
     response = requests.get(url)
-    print(f"Checking if image exists: {response.status_code}")
+    logging.info(f"Checking if image exists: {response.status_code}")
     return response.status_code == 200
 
 @app.post("/register_lab")
@@ -228,26 +324,25 @@ def register_lab(data: dict):
     Will store in Mongo and spin up the container immediately 
     so it runs for 24 hours initially.
     """
-    global container_states
+    
     lab_id = data.get("lab_id")
     docker_image = data.get("docker_image")
     port = data.get("port")
-    print(data)
+    logging.info(data)
     if not lab_id or not docker_image or not port:
         raise HTTPException(status_code=400, detail="Missing required fields")
-    print(f"Registering lab: {lab_id}")
-    mongoclient.update("lab_design", {"_id": ObjectId(lab_id)}, {"$set": {"running_status": "running"}})
-    print(f"Checking if image exists: {docker_image}")
+    logging.info(f"Registering lab: {lab_id}")
+    logging.info(f"Checking if image exists: {docker_image}")
 
     if wait_for_image(docker_image):
-        print(f"Image {docker_image} exists.")
+        logging.info(f"Image {docker_image} exists.")
     else:
         raise HTTPException(status_code=400, detail="Docker image not found")
 
     # Initialize in container_states as "running" from the start
     container_name = f"{lab_id}"
     container_states[lab_id] = {
-        "running_status": "running",
+        "running_status": "starting",
         "last_activity": time.time(),
         "port": port,
         "docker_image": docker_image,
@@ -265,26 +360,31 @@ def register_lab(data: dict):
     run_container(lab_id, docker_image, port)
 
     # pull the repo, run the codelab and update the nginx snippet
-    print(f"Pulling repo for lab: {lab_id}")
+    logging.info(f"Pulling repo for lab: {lab_id}")
     get_repo(lab_id)
-    print(f"Running codelab for lab: {lab_id}")
+    logging.info(f"Running codelab for lab: {lab_id}")
     run_codelab(lab_id)
-    print(f"Updating nginx snippet for lab: {lab_id}")
+    logging.info(f"Updating nginx snippet for lab: {lab_id}")
     add_lab_sh_command(lab_id, port)
-    print(f"Lab {lab_id} registered and started successfully.")
+    logging.info(f"Lab {lab_id} registered and started successfully.")
+    container_states[lab_id]["running_status"] = "running"
+    
+    save_container_states()
 
     return {"message": f"Lab {lab_id} registered and started successfully."}
 
 @app.delete("/labs/{lab_id}")
 def remove_app(lab_id: str):
     """Delete the lab from Mongo and stop/remove any running container."""
-    global container_states
+    
     if lab_id in container_states:
         state = container_states[lab_id]
         container_name = state["container_name"]
         subprocess.run(["sudo", "docker", "stop", container_name], capture_output=True)
         subprocess.run(["sudo", "docker", "rm", container_name], capture_output=True)
         del container_states[lab_id]
+        save_container_states()
+        logging.info(f"Lab {lab_id} deleted successfully.")
 
     return {"message": f"Lab {lab_id} deleted successfully."}
 
@@ -294,27 +394,33 @@ def serve_lab_page(lab_id: str, request: Request):
     Main entrypoint for users to open a Streamlit lab.
     Checks if the container is running; if not, starts or shows 'starting up' page.
     """
-    global container_states
-    doc = mongoclient.find("lab_design", {"_id": ObjectId(lab_id)})
+    try:
+        doc = mongoclient.find("lab_design", {"_id": ObjectId(lab_id)})
+    except Exception as e:
+        return lab_does_not_exist_page(lab_id, request)
+    
     if not doc:
-        raise HTTPException(status_code=404, detail="Lab not found in DB")
+        return lab_does_not_exist_page(lab_id, request)
     doc = doc[0]
     
-    print(container_states)
+    logging.info(container_states)
 
     # If not in container_states, init it
     if lab_id not in container_states:
         container_name = f"{lab_id}"
         container_states[lab_id] = {
-            "running_status": "running" if doc.get("running_status") else "stopped",
+            "running_status": doc.get("running_status", "stopped"),
             "last_activity": time.time(),
             "port": doc["port"],
             "docker_image": doc["docker_image"],
             "container_name": container_name
         }
+        
     port = container_states[lab_id]["port"]
     state = container_states[lab_id]
     state["last_activity"] = time.time()
+    container_states[lab_id] = state
+    save_container_states()
 
     # Check actual Docker status if state is running
     if state["running_status"] == "running":
@@ -339,98 +445,68 @@ def serve_lab_page(lab_id: str, request: Request):
         thread.start()
         return loading_page(lab_id, request=request)
 
+@app.get("/loading/{lab_id}", response_class=HTMLResponse)
+def get_loading_page(lab_id: str, request: Request):
+    return loading_page(lab_id, request)
+
+
 def loading_page(lab_id: str, request: Request) -> HTMLResponse:
     """
     Returns an HTML page that auto-polls /status/{lab_id} 
     to detect 'running' and then redirect automatically.
     """
-    return HTMLResponse(content=f"""
-    <html>
-      <head>
-        <title>Starting {lab_id}...</title>
-        <style>
-          body {{
-            background: linear-gradient(135deg, #f6d365 0%, #fda085 100%);
-            color: #333;
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            text-align: center;
-            margin: 0;
-            padding: 0;
-            height: 100vh;
-            display: flex;
-            flex-direction: column;
-            justify-content: center;
-          }}
-          h1 {{
-            font-size: 2.5em;
-            margin-bottom: 0.2em;
-          }}
-          p {{
-            font-size: 1.2em;
-          }}
-          .spinner {{
-            margin: 40px auto;
-            width: 50px;
-            height: 50px;
-            border: 5px solid rgba(255, 255, 255, 0.6);
-            border-top: 5px solid #fff;
-            border-radius: 50%;
-            animation: spin 1s linear infinite;
-          }}
-          @keyframes spin {{
-            0% {{ transform: rotate(0deg); }}
-            100% {{ transform: rotate(360deg); }}
-          }}
-          .loading-text {{
-            font-size: 1.1em;
-            animation: fadeInOut 2s infinite;
-          }}
-          @keyframes fadeInOut {{
-            0% {{ opacity: 0.2; }}
-            50% {{ opacity: 1; }}
-            100% {{ opacity: 0.2; }}
-          }}
-        </style>
-      </head>
-      <body>
-        <h1>Starting your "{lab_id}" Streamlit app...</h1>
-        <div class="spinner"></div>
-        <p class="loading-text">Please wait, loading in progress...</p>
-        <script>
-          async function checkStatus() {{
-            try {{
-              const resp = await fetch('/status/{lab_id}');
-              const data = await resp.json();
-              if (data.status === 'running') {{
-                window.location.href = data.url;
-              }}
-            }} catch(e) {{
-              console.error(e);
-            }}
-          }}
-          setInterval(checkStatus, 10000);
-        </script>
-      </body>
-    </html>
-    """, status_code=200)
+    logging.info("Lab id in loading page: " + lab_id)
+    template = env.get_template("loading_page.html")
+    rendered_html = template.render(lab_id=lab_id)
+    return HTMLResponse(content=rendered_html, status_code=200)
 
+
+def lab_does_not_exist_page(lab_id: str, request: Request) -> HTMLResponse:
+    template = env.get_template("lab_not_found.html")
+    rendered_html = template.render()
+    return HTMLResponse(content=rendered_html, status_code=404)
+    
 
 @app.get("/status/{lab_id}")
 def status_endpoint(lab_id: str, request: Request):
     """Poll this endpoint from the 'loading' page to see if container is running yet."""
-    global container_states
+    
     if lab_id not in container_states:
-        raise HTTPException(status_code=404, detail="Lab not found in memory.")
+        try:
+            lab = mongoclient.find("lab_design", {"_id": ObjectId(lab_id)})
+        except Exception as e:
+            return lab_does_not_exist_page(lab_id, request)
+        
+        if not lab:
+            return lab_does_not_exist_page(lab_id, request)
+        lab = lab[0]
+        container_name = f"{lab_id}"
+        container_states[lab_id] = {
+            "running_status": lab.get("running_status", "stopped"),
+            "last_activity": time.time(),
+            "port": lab["port"],
+            "docker_image": lab["docker_image"],
+            "container_name": container_name
+        }
+        container_states["running_status"] = "starting"
+        save_container_states()
+        run_container(lab_id, lab["docker_image"], lab["port"])
+        container_states["running_status"] = "running"
+        save_container_states()
+        
     state = container_states[lab_id]
     state["last_activity"] = time.time()
-    
     logging.info(container_states)
 
     if state["running_status"] == "starting" and is_container_running(state["container_name"]):
         state["running_status"] = "running"
     if state["running_status"] == "running" and not is_container_running(state["container_name"]):
         state["running_status"] = "stopped"
+        run_container(lab_id, state["docker_image"], state["port"])
+        state["running_status"] = "starting"
 
     url = f"http://{request.client.host}:{state['port']}/{lab_id}"
+    save_container_states()
+    
     return {"running_status": state["running_status"], "url": url}
 

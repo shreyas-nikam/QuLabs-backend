@@ -1,0 +1,91 @@
+<!-- templates/loading_page.html -->
+<html>
+  <head>
+    <title>Starting QuLab...</title>
+    <link rel="icon" type="image/png" href="https://qucoursify.s3.us-east-1.amazonaws.com/qu-coursify/logo.png">
+    <style>
+      body {
+        background: #20677b;
+        color: #fff;
+        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        text-align: center;
+        margin: 0;
+        padding: 0;
+        height: 100vh;
+        display: flex;
+        flex-direction: column;
+      }
+      .container {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+      }
+      .logo {
+        margin-bottom: 20px;
+      }
+      h1 {
+        font-size: 2.5em;
+        margin-bottom: 0.2em;
+      }
+      p {
+        font-size: 1.2em;
+      }
+      .spinner {
+        margin: 40px auto;
+        width: 50px;
+        height: 50px;
+        border: 5px solid rgba(255, 255, 255, 0.6);
+        border-top: 5px solid #fff;
+        border-radius: 50%;
+        animation: spin 1s linear infinite;
+      }
+      @keyframes spin {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+      }
+      .loading-text {
+        font-size: 1.1em;
+        animation: fadeInOut 2s infinite;
+      }
+      @keyframes fadeInOut {
+        0% { opacity: 0.2; }
+        50% { opacity: 1; }
+        100% { opacity: 0.2; }
+      }
+      footer {
+        margin-top: auto;
+        padding: 20px;
+        font-size: 0.9em;
+        background: #184f55; /* Slightly darker for footer contrast */
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <img class="logo" target="_blank" src="https://qucoursify.s3.us-east-1.amazonaws.com/qu-skillbridge/qulabs_logo.png" alt="QuLabs Logo" width="200">
+      <h1>Starting your QuLab...</h1>
+      <div class="spinner"></div>
+      <p class="loading-text">Please wait, loading in progress...</p>
+    </div>
+    <footer>
+      © 2025, Powered by <a href="https://quantuniversity.com/">QuantUniversity</a>. All rights reserved.
+    </footer>
+    <script>
+      async function checkStatus() {
+        try {
+          const resp = await fetch('/status/{{ lab_id }}');
+          const data = await resp.json();
+          console.log(data);
+          if (data.running_status === 'running') {
+            window.location.href = data.url;
+          }
+        } catch(e) {
+          console.error(e);
+        }
+      }
+      setInterval(checkStatus, 10000);
+    </script>
+  </body>
+</html>
