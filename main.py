@@ -67,9 +67,9 @@ def init_idle_checker():
                         # Stop container
                         container_name = state["container_name"]
                         logging.info(f"Stopping container {container_name} due to inactivity.")
-                        subprocess.run(["docker", "stop", container_name], capture_output=True)
-                        subprocess.run(["docker", "rm", container_name], capture_output=True)
-                        subprocess.run(["docker", "system", "prune", "-a"], capture_output=True)
+                        subprocess.run(["sudo", "docker", "stop", container_name], capture_output=True)
+                        subprocess.run(["sudo", "docker", "rm", container_name], capture_output=True)
+                        subprocess.run(["sudo", "docker", "system", "prune", "-a"], capture_output=True)
                         # Mark as stopped
                         state["running_status"] = "stopped"
                         logging.info(f"Marked lab {lab_id} as 'stopped' due to inactivity.")
@@ -81,7 +81,7 @@ init_idle_checker()
 def is_container_running(container_name: str) -> bool:
     """Check via `docker ps` if a container is running."""
     result = subprocess.run(
-        ["docker", "ps", "-q", "-f", f"name={container_name}"],
+        ["sudo", "docker", "ps", "-q", "-f", f"name={container_name}"],
         capture_output=True, text=True
     )
     logging.info(f"Checking if container {container_name} is running: {bool(result.stdout.strip())}")
@@ -90,7 +90,7 @@ def is_container_running(container_name: str) -> bool:
 def container_exists(container_name: str) -> bool:
     """Return True if a container with the exact name exists (running or not)."""
     cmd = [
-        "docker", "ps", "-a", 
+        "sudo", "docker", "ps", "-a", 
         "--filter", f"name=^{container_name}$", 
         "--format", "{{.Names}}"
     ]
@@ -102,7 +102,7 @@ def container_exists(container_name: str) -> bool:
 def container_running(container_name: str) -> bool:
     """Return True if a container with the exact name is running."""
     cmd = [
-        "docker", "ps", 
+        "sudo", "docker", "ps", 
         "--filter", f"name=^{container_name}$", 
         "--format", "{{.Names}}"
     ]
@@ -114,7 +114,7 @@ def container_running(container_name: str) -> bool:
 def start_existing_container(container_name: str, lab_id: str):
     """Start a container that exists but is not running."""
     logging.info(f"Container {container_name} exists but is not running. Starting it.")
-    cmd = ["docker", "start", container_name]
+    cmd = ["sudo", "docker", "start", container_name]
     process = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -134,7 +134,7 @@ def run_new_container(container_name: str, docker_image: str, port: int, lab_id:
     """Run a new container using docker run."""
     logging.info(f"Running new docker container for lab {lab_id} with image {docker_image} on port {port}")
     process = subprocess.Popen(
-        ["docker", "run", "-d", "--name", container_name, "-p", f"{port}:8501", docker_image],
+        ["sudo", "docker", "run", "-d", "--name", container_name, "-p", f"{port}:8501", docker_image],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -353,8 +353,8 @@ def register_lab(data: dict):
     logging.info(container_states)
 
     # Stop & remove if leftover container with same name
-    subprocess.run(["docker", "stop", container_name], capture_output=True)
-    subprocess.run(["docker", "rm", container_name], capture_output=True)
+    subprocess.run(["sudo", "docker", "stop", container_name], capture_output=True)
+    subprocess.run(["sudo", "docker", "rm", container_name], capture_output=True)
 
     # Run the container now
     run_container(lab_id, docker_image, port)
@@ -380,8 +380,8 @@ def remove_app(lab_id: str):
     if lab_id in container_states:
         state = container_states[lab_id]
         container_name = state["container_name"]
-        subprocess.run(["docker", "stop", container_name], capture_output=True)
-        subprocess.run(["docker", "rm", container_name], capture_output=True)
+        subprocess.run(["sudo", "docker", "stop", container_name], capture_output=True)
+        subprocess.run(["sudo", "docker", "rm", container_name], capture_output=True)
         del container_states[lab_id]
         save_container_states()
         logging.info(f"Lab {lab_id} deleted successfully.")
