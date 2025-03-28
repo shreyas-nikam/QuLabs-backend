@@ -46,7 +46,7 @@ Run this command to start the docker container. (Do not pull)
 ```
 docker run -d \
   -e MONGO_URI="<MONGO_URI>" \
-  -e GITHUB_USERNAME="<GITHUB_USERNAME>"
+  -e GITHUB_USERNAME="<USERNAME>" \
   -e MONGO_DB="production" \
   -p 8002:8002 \
   qunikamshreyas/qulabs-backend:latest
@@ -63,7 +63,7 @@ docker run -d \
 
 For watching all containers:
 ```
-docker run -d   --name watchtower-global   -e WATCHTOWER_POLL_INTERVAL=30   -e WATCHTOWER_CLEANUP=true   -v /var/run/docker.sock:/var/run/docker.sock   containrrr/watchtower --interval 30
+sudo docker run -d   --name watchtower-global   -e WATCHTOWER_POLL_INTERVAL=30   -e WATCHTOWER_CLEANUP=true   -v /var/run/docker.sock:/var/run/docker.sock   containrrr/watchtower --interval 30
 ```
 
 

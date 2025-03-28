@@ -34,3 +34,9 @@ docker-compose.override.yml
 # IDEs
 .vscode/
 .idea/
+
+
+.cache_ggshield
+claat
+
+temp.py
